@@ -8,15 +8,19 @@ import (
 )
 
 type State struct {
-	mu     sync.RWMutex
-	value  model.Reflux
-	cancel context.CancelFunc
+	mu        sync.RWMutex
+	value     model.Reflux
+	cancel    context.CancelFunc
+	curve     *curveState
+	lastCurve Curve
 }
 
 func New() *State { return &State{value: model.Reflux{PumpCapacity: 1}} }
 
 func (s *State) Snapshot() model.Reflux { s.mu.RLock(); defer s.mu.RUnlock(); return s.value }
 
+// Ramp 把回流比逐步逼近单一目标；每个周期只走一步，
+// 超过目标时精确落在目标上，不产生回调或超调。
 func (s *State) Ramp(ctx context.Context, c model.Campaign, target float64, tick time.Duration) error {
 	child, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
@@ -30,7 +34,11 @@ func (s *State) Ramp(ctx context.Context, c model.Campaign, target float64, tick
 			s.mu.Unlock()
 			return nil
 		}
-		s.value.Ratio += 0.1
+		next := s.value.Ratio + defaultStep
+		if next > target {
+			next = target
+		}
+		s.value.Ratio = next
 		s.mu.Unlock()
 		select {
 		case <-child.Done():

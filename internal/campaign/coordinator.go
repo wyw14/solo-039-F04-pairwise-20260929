@@ -3,6 +3,8 @@ package campaign
 import (
 	"context"
 	"errors"
+	"time"
+
 	"github.com/wyw14/solo-039/internal/feed"
 	"github.com/wyw14/solo-039/internal/model"
 	"github.com/wyw14/solo-039/internal/reboiler"
@@ -28,7 +30,16 @@ func (c *Coordinator) Start(ctx context.Context) error {
 	if err := c.Reboiler.Ramp(ctx, c.State.Snapshot(), 0.45); err != nil {
 		return err
 	}
+	// 升温阶段只提交并执行曲线的升温段；未达升温段目标前不切换阶段。
+	curve := reflux.DefaultCurve()
+	if _, err := c.Reflux.RunCurve(ctx, c.State.Snapshot(), curve, time.Millisecond, nil); err != nil {
+		return err
+	}
 	c.State.Advance(model.Stabilizing)
+	// 进入稳定阶段后续跑曲线，保留升温段结果，逐段逼近最终回流比。
+	if _, err := c.Reflux.ResumeCurve(ctx, c.State.Snapshot(), time.Millisecond, nil); err != nil {
+		return err
+	}
 	return nil
 }
 

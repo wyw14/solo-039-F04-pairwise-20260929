@@ -22,6 +22,17 @@ type leaseRequest struct {
 	Owner  string  `json:"owner"`
 	Amount float64 `json:"amount"`
 }
+type segmentRequest struct {
+	Phase     string  `json:"phase"`
+	Target    float64 `json:"target"`
+	Band      float64 `json:"band"`
+	HoldMS    int64   `json:"hold_ms"`
+	TimeoutMS int64   `json:"timeout_ms"`
+	Step      float64 `json:"step"`
+}
+type curveRequest struct {
+	Segments []segmentRequest `json:"segments"`
+}
 
 func decodeJSON(r *http.Request, value any) error {
 	decoder := json.NewDecoder(r.Body)

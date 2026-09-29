@@ -130,7 +130,22 @@ func (p *Plant) Start(ctx context.Context, grade, source string) (model.Campaign
 		p.fail(err)
 		return model.Campaign{}, err
 	}
+	// 按批次阶段提交回流目标曲线：升温段只建立初步回流，
+	// 未到达升温段目标前不允许进入稳定阶段。
+	curve := reflux.DefaultCurve()
+	if _, err := p.RefluxState.RunCurve(ctx, p.Campaign.Snapshot(), curve, time.Millisecond, p.recordRefluxSegment); err != nil {
+		operationErr = err
+		p.fail(err)
+		return model.Campaign{}, err
+	}
 	p.Campaign.Advance(model.Stabilizing)
+	// 阶段切换后续跑曲线：升温段结果保留，继续逼近稳定段目标，
+	// 当前段未达目标就留在该段并记录原因。
+	if _, err := p.RefluxState.ResumeCurve(ctx, p.Campaign.Snapshot(), time.Millisecond, p.recordRefluxSegment); err != nil {
+		operationErr = err
+		p.fail(err)
+		return model.Campaign{}, err
+	}
 	p.Column.Apply(p.Campaign.Snapshot(), 1.1, 0.5)
 	_ = p.Profile.Put(column.TrayReading{Tray: 1, Temperature: 118, Pressure: 1.1})
 	_ = p.Profile.Put(column.TrayReading{Tray: 20, Temperature: 82, Pressure: 0.9})
@@ -224,6 +239,53 @@ func (p *Plant) AcquireReflux(owner string, amount float64) (model.Lease, error)
 	return lease, nil
 }
 
+// CommitRefluxCurve 按当前批次阶段提交回流目标曲线：只执行归属当前阶段的段，
+// 后续阶段的段在阶段切换时通过 ResumeRefluxCurve 续跑。
+func (p *Plant) CommitRefluxCurve(ctx context.Context, curve reflux.Curve) (reflux.CurveProgress, error) {
+	current := p.Campaign.Snapshot()
+	progress, err := p.RefluxState.RunCurve(ctx, current, curve, time.Millisecond, p.recordRefluxSegment)
+	p.RefluxTelemetry.Record(p.RefluxState.Snapshot())
+	if err != nil {
+		p.Incidents.Open("reflux-curve", err.Error(), current.Revision.String())
+		p.fail(err)
+		return progress, err
+	}
+	return progress, nil
+}
+
+// ResumeRefluxCurve 在批次阶段切换后续跑已提交的曲线；上一段结果保留，
+// 当前段未达目标则停留并返回带原因的进度。
+func (p *Plant) ResumeRefluxCurve(ctx context.Context) (reflux.CurveProgress, error) {
+	current := p.Campaign.Snapshot()
+	progress, err := p.RefluxState.ResumeCurve(ctx, current, time.Millisecond, p.recordRefluxSegment)
+	p.RefluxTelemetry.Record(p.RefluxState.Snapshot())
+	if err != nil {
+		p.Incidents.Open("reflux-curve", err.Error(), current.Revision.String())
+		p.fail(err)
+		return progress, err
+	}
+	return progress, nil
+}
+
+// RefluxCurveStatus 返回最近一次提交曲线的执行进度；未提交过时为 nil。
+func (p *Plant) RefluxCurveStatus() any {
+	progress, ok := p.RefluxState.Curve()
+	if !ok {
+		return nil
+	}
+	return progress
+}
+
+// recordRefluxSegment 把每段的实际到达时间、偏差或停留原因写入日志。
+func (p *Plant) recordRefluxSegment(segment reflux.SegmentResult) {
+	payload := fmt.Sprintf("%s:%d:%.3f:%s:%.3f:%+.3f:%d:%s",
+		segment.Phase, segment.Index, segment.Target, segment.Status,
+		segment.Ratio, segment.Deviation, segment.Elapsed.Nanoseconds(), segment.Reason)
+	if err := p.record("reflux.segment", payload); err != nil {
+		p.fail(err)
+	}
+}
+
 func (p *Plant) Shutdown(ctx context.Context, reliefTimeout bool) (relief.ShutdownResult, error) {
 	current := p.Campaign.Advance(model.Shutting)
 	reliefErr := p.Relief.Shutdown(ctx, current, "flare", reliefTimeout)
@@ -284,7 +346,7 @@ func (p *Plant) Status() map[string]any {
 	lastError := p.lastError
 	p.mu.RUnlock()
 	gradient, _ := p.Profile.Gradient()
-	return map[string]any{"started": started, "last_error": lastError, "campaign": p.Campaign.Snapshot(), "column": p.Column.Snapshot(), "reflux_used": p.Reflux.Used(), "products": p.ProductTargets(), "relief": p.Relief.State.Snapshot(), "feed_metrics": p.FeedMetrics.Snapshot(), "reflux_telemetry": p.RefluxTelemetry.Snapshot(), "reboiler_telemetry": p.ReboilerTelemetry.Snapshot(), "product_decisions": p.ProductAudit.Count(), "utility_used": p.UtilityLedger.Used(), "metrics": p.Metrics.Snapshot(), "campaign_changes": p.CampaignHistory.Count(), "profile_gradient": gradient, "profile_stable": p.Profile.Stable(40), "evidence_count": p.Evidence.Count(p.Campaign.Snapshot().Revision.String()), "relief_attempts": p.ReliefHistory.Count(), "open_incidents": p.Incidents.CountOpen(), "operational_audit": p.OperationalAudit()}
+	return map[string]any{"started": started, "last_error": lastError, "campaign": p.Campaign.Snapshot(), "column": p.Column.Snapshot(), "reflux_used": p.Reflux.Used(), "reflux_curve": p.RefluxCurveStatus(), "products": p.ProductTargets(), "relief": p.Relief.State.Snapshot(), "feed_metrics": p.FeedMetrics.Snapshot(), "reflux_telemetry": p.RefluxTelemetry.Snapshot(), "reboiler_telemetry": p.ReboilerTelemetry.Snapshot(), "product_decisions": p.ProductAudit.Count(), "utility_used": p.UtilityLedger.Used(), "metrics": p.Metrics.Snapshot(), "campaign_changes": p.CampaignHistory.Count(), "profile_gradient": gradient, "profile_stable": p.Profile.Stable(40), "evidence_count": p.Evidence.Count(p.Campaign.Snapshot().Revision.String()), "relief_attempts": p.ReliefHistory.Count(), "open_incidents": p.Incidents.CountOpen(), "operational_audit": p.OperationalAudit()}
 }
 
 func (p *Plant) record(kind, payload string) error {

@@ -15,6 +15,8 @@ func (s *Server) routes() {
 	s.router.Post("/api/analyzer/calibrate", s.calibrate)
 	s.router.Post("/api/products/route", s.routeProduct)
 	s.router.Post("/api/reflux/leases", s.lease)
+	s.router.Post("/api/reflux/curve", s.curve)
+	s.router.Post("/api/reflux/curve/resume", s.resumeCurve)
 	s.router.Post("/api/shutdown", s.shutdown)
 	s.router.Get("/api/snapshot", s.snapshot)
 	s.router.Get("/api/evidence", s.evidence)

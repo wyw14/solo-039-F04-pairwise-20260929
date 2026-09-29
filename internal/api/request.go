@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+
+	"github.com/wyw14/solo-039/internal/reflux"
 )
 
 type transitionRequest struct {
@@ -21,6 +23,11 @@ type routeRequest struct {
 type leaseRequest struct {
 	Owner  string  `json:"owner"`
 	Amount float64 `json:"amount"`
+}
+type curveRequest struct {
+	Segments []reflux.CurveSegment `json:"segments"`
+	Extend   bool                  `json:"extend"`
+	Drive    bool                  `json:"drive"`
 }
 
 func decodeJSON(r *http.Request, value any) error {

@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"time"
+
+	"github.com/wyw14/solo-039/internal/reflux"
 )
 
 func (s *Server) transition(w http.ResponseWriter, r *http.Request) {
@@ -66,6 +68,41 @@ func (s *Server) lease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, value)
+}
+
+func (s *Server) submitCurve(w http.ResponseWriter, r *http.Request) {
+	var input curveRequest
+	if err := decodeJSON(r, &input); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if input.Segments == nil {
+		input.Segments = []reflux.CurveSegment{}
+	}
+	status, err := s.plant.SubmitRefluxCurve(input.Segments, input.Extend)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "status": status})
+		return
+	}
+	// drive=false 时只提交目标曲线，不替调用方跨越任何控制步骤。
+	if input.Drive {
+		status, err = s.plant.DriveRefluxSegment(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "status": status})
+			return
+		}
+	}
+	writeJSON(w, http.StatusAccepted, status)
+}
+
+func (s *Server) advanceCurve(w http.ResponseWriter, r *http.Request) {
+	// 当前段未达标时这里会失败并留在当前段，错误信息即留段原因。
+	status, err := s.plant.AdvanceRefluxSegment()
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "status": status})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, status)
 }
 
 func (s *Server) shutdown(w http.ResponseWriter, r *http.Request) {

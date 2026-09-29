@@ -56,6 +56,9 @@ type Plant struct {
 	lastError         string
 }
 
+// refluxControlTick 是回流曲线每个控制步之间的间隔，步长本身固定在 reflux 包内。
+const refluxControlTick = time.Millisecond
+
 func NewPlant(dataDir string) *Plant {
 	campaignState := campaign.New("baseline")
 	analyzerState := analyzer.New()
@@ -125,12 +128,34 @@ func (p *Plant) Start(ctx context.Context, grade, source string) (model.Campaign
 	p.Column.SetFeedRevision(p.Feed.Current.Revision)
 	p.Analyzer.BindFeed(p.Feed.Current.Revision)
 	p.Campaign.Advance(model.Warming)
+	if err := p.RefluxState.CommitCurve(p.Campaign.Snapshot(), defaultRefluxCurve(), false); err != nil {
+		operationErr = err
+		p.fail(err)
+		return model.Campaign{}, err
+	}
 	if err := p.Reboiler.Ramp(ctx, p.Campaign.Snapshot(), 0.5); err != nil {
 		operationErr = err
 		p.fail(err)
 		return model.Campaign{}, err
 	}
+	// 升温段：回流比只能逐控制步升到本段目标，未达标不得进入稳定阶段。
+	if err := p.driveRefluxSegment(ctx); err != nil {
+		operationErr = err
+		p.fail(err)
+		return model.Campaign{}, err
+	}
+	if _, _, err := p.RefluxState.AdvanceSegment(p.Campaign.Snapshot()); err != nil {
+		operationErr = err
+		p.fail(err)
+		return model.Campaign{}, err
+	}
 	p.Campaign.Advance(model.Stabilizing)
+	// 稳定段：在升温段已到达值的基础上继续逐步抬升到最终回流比，绝不一下跳变。
+	if err := p.driveRefluxSegment(ctx); err != nil {
+		operationErr = err
+		p.fail(err)
+		return model.Campaign{}, err
+	}
 	p.Column.Apply(p.Campaign.Snapshot(), 1.1, 0.5)
 	_ = p.Profile.Put(column.TrayReading{Tray: 1, Temperature: 118, Pressure: 1.1})
 	_ = p.Profile.Put(column.TrayReading{Tray: 20, Temperature: 82, Pressure: 0.9})
@@ -284,7 +309,7 @@ func (p *Plant) Status() map[string]any {
 	lastError := p.lastError
 	p.mu.RUnlock()
 	gradient, _ := p.Profile.Gradient()
-	return map[string]any{"started": started, "last_error": lastError, "campaign": p.Campaign.Snapshot(), "column": p.Column.Snapshot(), "reflux_used": p.Reflux.Used(), "products": p.ProductTargets(), "relief": p.Relief.State.Snapshot(), "feed_metrics": p.FeedMetrics.Snapshot(), "reflux_telemetry": p.RefluxTelemetry.Snapshot(), "reboiler_telemetry": p.ReboilerTelemetry.Snapshot(), "product_decisions": p.ProductAudit.Count(), "utility_used": p.UtilityLedger.Used(), "metrics": p.Metrics.Snapshot(), "campaign_changes": p.CampaignHistory.Count(), "profile_gradient": gradient, "profile_stable": p.Profile.Stable(40), "evidence_count": p.Evidence.Count(p.Campaign.Snapshot().Revision.String()), "relief_attempts": p.ReliefHistory.Count(), "open_incidents": p.Incidents.CountOpen(), "operational_audit": p.OperationalAudit()}
+	return map[string]any{"started": started, "last_error": lastError, "campaign": p.Campaign.Snapshot(), "column": p.Column.Snapshot(), "reflux_used": p.Reflux.Used(), "products": p.ProductTargets(), "relief": p.Relief.State.Snapshot(), "feed_metrics": p.FeedMetrics.Snapshot(), "reflux_telemetry": p.RefluxTelemetry.Snapshot(), "reboiler_telemetry": p.ReboilerTelemetry.Snapshot(), "product_decisions": p.ProductAudit.Count(), "utility_used": p.UtilityLedger.Used(), "metrics": p.Metrics.Snapshot(), "campaign_changes": p.CampaignHistory.Count(), "profile_gradient": gradient, "profile_stable": p.Profile.Stable(40), "evidence_count": p.Evidence.Count(p.Campaign.Snapshot().Revision.String()), "relief_attempts": p.ReliefHistory.Count(), "open_incidents": p.Incidents.CountOpen(), "reflux_curve": p.RefluxState.CurveStatus(), "operational_audit": p.OperationalAudit()}
 }
 
 func (p *Plant) record(kind, payload string) error {
